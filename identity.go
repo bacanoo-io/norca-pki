@@ -113,6 +113,32 @@ func (ca *CertificateAuthority) Issue(id Identity, validYears int) (*Certificate
 	return ca.sign(template, validYears)
 }
 
+// IssueFor signs a leaf certificate (server and client auth) for the
+// identity, valid for the duration but never beyond the certificate of the
+// CA: a leaf does not outlive the CA that signed it. The node scaling
+// operator issues the certificates of the nodes it creates this way, with the
+// node CA of the region.
+func (ca *CertificateAuthority) IssueFor(id Identity, validity time.Duration) (*CertificateBundle, error) {
+	if validity <= 0 {
+		return nil, fmt.Errorf("the validity must be positive, got %s", validity)
+	}
+	notAfter := time.Now().Add(validity)
+	if caEnd := ca.Certificate.NotAfter; notAfter.After(caEnd) {
+		notAfter = caEnd
+	}
+	template := &x509.Certificate{
+		Subject:     pkix.Name{CommonName: id.CN},
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		DNSNames:    id.DNS,
+		IPAddresses: id.IPs,
+	}
+	if id.SPIFFE != nil {
+		template.URIs = []*url.URL{id.SPIFFE}
+	}
+	return ca.signUntil(template, notAfter)
+}
+
 // IssueIntermediate signs an intermediate CA, e.g. for the PKI of OpenZiti:
 // its controllers and routers then chain up to the cluster CA. maxPathLen is
 // the number of CA levels allowed below it; the trust domain, if any, is its

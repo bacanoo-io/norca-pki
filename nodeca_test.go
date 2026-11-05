@@ -156,3 +156,54 @@ func TestNodeCAValidity(t *testing.T) {
 		}
 	}
 }
+
+// IssueFor gives a node certificate of a duration, never beyond the node CA,
+// that verifies against the cluster CA through the node CA.
+func TestIssueForANode(t *testing.T) {
+	td, _ := TrustDomain("prod.norca")
+	root, err := NewCA("test", 1, td)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := root.IssueNodeCA("test eu Node CA", "eu", 30*day, td)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inter := nodeCAOf(t, b)
+	spiffe, _ := SPIFFEID(td, "region", "eu", "node", "workers-dc1-3-1")
+
+	leafBundle, err := inter.IssueFor(ClientIdentity("eu").WithSPIFFE(spiffe), 60*day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := parse(t, leafBundle.CertPEM)
+	if !leaf.NotAfter.Equal(inter.Certificate.NotAfter) {
+		t.Fatalf("the leaf ends %s, after its CA (%s)", leaf.NotAfter, inter.Certificate.NotAfter)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(root.Certificate)
+	ints := x509.NewCertPool()
+	ints.AddCert(inter.Certificate)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: ints,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		t.Fatalf("the node certificate does not verify: %v", err)
+	}
+
+	short, err := inter.IssueFor(ClientIdentity("eu"), 10*day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left := time.Until(parse(t, short.CertPEM).NotAfter); left < 9*day || left > 10*day {
+		t.Fatalf("a 10 day certificate ends in %s", left)
+	}
+	if _, err := inter.IssueFor(ClientIdentity("eu"), 0); err == nil {
+		t.Fatal("a zero validity is accepted")
+	}
+	// The node CA can not issue a server certificate this way either.
+	server, err := inter.IssueFor(ServerIdentity("eu", nil, nil), day)
+	if err == nil {
+		if _, verr := parse(t, server.CertPEM).Verify(x509.VerifyOptions{Roots: roots, Intermediates: ints}); verr == nil {
+			t.Fatal("a server certificate of the node CA verifies")
+		}
+	}
+}
