@@ -1,0 +1,7 @@
+# Editors
+.idea/
+.vscode/
+
+# Test output
+*.test
+*.out
