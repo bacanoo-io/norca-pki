@@ -101,7 +101,8 @@ func LoadCA(certPath, keyPath string) (*CertificateAuthority, error) {
 }
 
 // ParseCA builds a CA from the PEM of its certificate and private key. The
-// key may come from an encrypted file that the caller has decrypted.
+// key may come from an encrypted file that the caller has decrypted; it must
+// be the key of the certificate.
 func ParseCA(certData, keyData []byte) (*CertificateAuthority, error) {
 	certBlock, _ := pem.Decode(certData)
 	if certBlock == nil {
@@ -129,6 +130,12 @@ func ParseCA(certData, keyData []byte) (*CertificateAuthority, error) {
 		if !ok {
 			return nil, errors.New("only ECDSA CA private keys are supported")
 		}
+	}
+
+	// A key of another certificate would sign certificates that verify
+	// nowhere.
+	if !privKey.PublicKey.Equal(cert.PublicKey) {
+		return nil, errors.New("the CA private key does not belong to the CA certificate")
 	}
 
 	return &CertificateAuthority{

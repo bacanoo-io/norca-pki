@@ -126,3 +126,21 @@ func TestIntermediateForOpenZiti(t *testing.T) {
 		t.Fatal("path length 0 not encoded")
 	}
 }
+
+// A key that is not the key of the certificate is refused.
+func TestParseCAKeyMustMatch(t *testing.T) {
+	a, err := NewCA("a", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewCA("b", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseCA(a.CertPEM, a.KeyPEM); err != nil {
+		t.Fatalf("the CA's own key: %v", err)
+	}
+	if _, err := ParseCA(a.CertPEM, b.KeyPEM); err == nil {
+		t.Fatal("the key of another CA is accepted")
+	}
+}
