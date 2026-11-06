@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -119,13 +120,45 @@ func (ca *CertificateAuthority) Issue(id Identity, validYears int) (*Certificate
 // operator issues the certificates of the nodes it creates this way, with the
 // node CA of the region.
 func (ca *CertificateAuthority) IssueFor(id Identity, validity time.Duration) (*CertificateBundle, error) {
+	notAfter, err := ca.leafEnd(validity)
+	if err != nil {
+		return nil, err
+	}
+	return ca.signUntil(leafTemplate(id), notAfter)
+}
+
+// IssueForKey is IssueFor for a key the holder made itself: only its public
+// key comes to the CA, so the bundle has no KeyPEM. A node that joins with
+// norca-join sends a certificate request (see ParseCSR) and keeps its key.
+func (ca *CertificateAuthority) IssueForKey(id Identity, pub crypto.PublicKey, validity time.Duration) (*CertificateBundle, error) {
+	if err := checkPublicKey(pub); err != nil {
+		return nil, err
+	}
+	notAfter, err := ca.leafEnd(validity)
+	if err != nil {
+		return nil, err
+	}
+	certPEM, err := ca.signKeyUntil(leafTemplate(id), pub, notAfter)
+	if err != nil {
+		return nil, err
+	}
+	return &CertificateBundle{CertPEM: certPEM, CAPEM: ca.CertPEM}, nil
+}
+
+// leafEnd is the end of a leaf of the validity: never beyond the CA.
+func (ca *CertificateAuthority) leafEnd(validity time.Duration) (time.Time, error) {
 	if validity <= 0 {
-		return nil, fmt.Errorf("the validity must be positive, got %s", validity)
+		return time.Time{}, fmt.Errorf("the validity must be positive, got %s", validity)
 	}
 	notAfter := time.Now().Add(validity)
 	if caEnd := ca.Certificate.NotAfter; notAfter.After(caEnd) {
 		notAfter = caEnd
 	}
+	return notAfter, nil
+}
+
+// leafTemplate is a leaf certificate (server and client auth) of the identity.
+func leafTemplate(id Identity) *x509.Certificate {
 	template := &x509.Certificate{
 		Subject:     pkix.Name{CommonName: id.CN},
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -136,7 +169,7 @@ func (ca *CertificateAuthority) IssueFor(id Identity, validity time.Duration) (*
 	if id.SPIFFE != nil {
 		template.URIs = []*url.URL{id.SPIFFE}
 	}
-	return ca.signUntil(template, notAfter)
+	return template
 }
 
 // IssueIntermediate signs an intermediate CA, e.g. for the PKI of OpenZiti:
@@ -220,27 +253,39 @@ func (ca *CertificateAuthority) signUntil(template *x509.Certificate, notAfter t
 	if err != nil {
 		return nil, err
 	}
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	if template.SerialNumber, err = rand.Int(rand.Reader, serialNumberLimit); err != nil {
-		return nil, err
-	}
-	template.NotBefore = time.Now().Add(-1 * time.Hour)
-	template.NotAfter = notAfter
-	template.BasicConstraintsValid = true
-
-	derBytes, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, &priv.PublicKey, ca.PrivateKey)
+	certPEM, err := ca.signKeyUntil(template, &priv.PublicKey, notAfter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign certificate: %w", err)
+		return nil, err
 	}
 	keyBytes, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
 		return nil, err
 	}
 	return &CertificateBundle{
-		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes}),
+		CertPEM: certPEM,
 		KeyPEM:  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}),
 		CAPEM:   ca.CertPEM,
 	}, nil
+}
+
+// signKeyUntil signs the template for the public key and returns the PEM of
+// the certificate.
+func (ca *CertificateAuthority) signKeyUntil(template *x509.Certificate, pub crypto.PublicKey, notAfter time.Time) ([]byte, error) {
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, err
+	}
+	template.SerialNumber = serial
+	template.NotBefore = time.Now().Add(-1 * time.Hour)
+	template.NotAfter = notAfter
+	template.BasicConstraintsValid = true
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, ca.Certificate, pub, ca.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign certificate: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes}), nil
 }
 
 func parseIPs(raw []string) []net.IP {
